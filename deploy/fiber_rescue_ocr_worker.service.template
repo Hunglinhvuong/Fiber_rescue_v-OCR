@@ -1,0 +1,24 @@
+[Unit]
+Description=Fiber Rescue - OCR Worker
+After=network.target postgresql.service fiber_rescue.service
+Wants=fiber_rescue.service
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__INSTALL_DIR__
+EnvironmentFile=__INSTALL_DIR__/.env
+ExecStart=/usr/bin/env bash __INSTALL_DIR__/deploy/run_ocr_worker.sh
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=__INSTALL_DIR__/storage
+
+[Install]
+WantedBy=multi-user.target

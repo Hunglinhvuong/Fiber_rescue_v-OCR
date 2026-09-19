@@ -1,0 +1,4 @@
+storages/
+.env
+venv/
+data/

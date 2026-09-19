@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE coordinate_extraction
+    ADD COLUMN IF NOT EXISTS retry_count INT NOT NULL DEFAULT 0;
+
+COMMIT;

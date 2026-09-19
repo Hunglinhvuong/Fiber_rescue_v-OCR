@@ -1,0 +1,229 @@
+Tiếp tục phát triển dự án **Fiber Rescue V1** theo kiến trúc hiện tại. Không thay đổi các business rule về route, cable type, repair span và material đã có.
+
+## 1. Bổ sung OCR tọa độ
+
+Mục tiêu: đọc `latitude/longitude` từ ảnh sự cố đã upload lên Cloudinary. Mỗi sự cố chỉ đọc 1 ảnh theo thứ tự ưu tiên After -> before. Nếu ảnh được chọn không có kết quả mới chuyển sang ảnh ưu tiên thấp hơn.
+
+Luồng:
+
+```text
+Telegram
+   ↓
+Cloudinary
+   ↓
+incident_photo
+   ↓
+OCR background job
+   ↓
+OCR Provider
+   ↓
+Coordinate Parser
+   ↓
+Coordinate Validation
+   ↓
+Coordinate Resolver
+   ↓
+PostgreSQL
+```
+
+OCR phải chạy background, không block Telegram Bot.
+
+## 2. OCR Provider
+
+Ưu tiên provider:
+
+1. **OCR.space** – provider chính, ưu tiên miễn phí.
+2. **Google Cloud Vision** – fallback khi OCR.space không đọc được tọa độ.
+3. Kiến trúc phải cho phép dễ dàng bổ sung provider khác sau này.
+
+Không để business logic phụ thuộc trực tiếp vào OCR.space hoặc Google.
+
+Thiết kế abstraction:
+
+```text
+ocr/
+├── __init__.py
+├── models.py
+├── parser.py
+├── service.py
+└── providers/
+    ├── __init__.py
+    ├── base.py
+    ├── ocr_space.py
+    └── google_vision.py
+```
+
+`base.py` định nghĩa interface chung, ví dụ:
+
+```python
+class OCRProvider:
+    def extract_text(self, image_url):
+        ...
+```
+
+Provider trả về một model/result thống nhất, không trả dữ liệu phụ thuộc riêng vào API của provider.
+
+## 3. OCR fallback
+
+Luồng mặc định:
+
+```text
+OCR.space
+   ↓
+parse tọa độ
+   ↓
+Có latitude + longitude hợp lệ?
+   ├── YES → sử dụng kết quả
+   └── NO
+        ↓
+Google Cloud Vision
+        ↓
+parse tọa độ
+        ↓
+Có hợp lệ?
+   ├── YES → sử dụng kết quả
+   └── NO → fallback Telegram GPS
+```
+
+Không gọi Google nếu OCR.space đã đọc được tọa độ hợp lệ.
+
+Có thể cấu hình provider/fallback trong `settings.py`, không hard-code trong handler.
+
+## 4. Coordinate Service
+
+Tạo:
+
+```text
+services/coordinate_service.py
+```
+
+Service chịu trách nhiệm:
+
+* parse/normalize tọa độ
+* validate latitude `-90..90`
+* validate longitude `-180..180`
+* nhận kết quả OCR
+* nhận GPS Telegram
+* quyết định tọa độ cuối cùng
+* xác định `coordinate_source`
+* không bao giờ ghép latitude của nguồn này với longitude của nguồn khác
+
+Chọn 1 trong các nguồn theo tứ tự ưu tiên:
+```text
+→ OCR AFTER
+→ OCR BEFORE
+→ Telegram GPS
+→ NONE
+```
+
+## 5. Database
+
+Bổ sung bảng:
+
+```text
+coordinate_extraction
+```
+
+Các trường:
+
+```text
+coordinate_extraction_id
+incident_id
+photo_id
+source
+raw_text
+latitude
+longitude
+confidence
+status
+error_message
+created_at
+```
+
+Bổ sung vào `incident`:
+
+```text
+gps_latitude
+gps_longitude
+ocr_latitude
+ocr_longitude
+latitude
+longitude
+coordinate_source
+coordinate_status
+```
+
+Lưu cả dữ liệu nguồn và tọa độ cuối cùng để audit/debug.
+
+## 6. OCR Worker
+
+Bổ sung:
+
+```text
+workers/
+├── __init__.py
+└── ocr_worker.py
+```
+
+Worker lấy các ảnh chưa OCR, gọi `ocr.service`, lưu kết quả vào DB rồi gọi `coordinate_service`.
+
+V1 ưu tiên giải pháp đơn giản, có thể dùng PostgreSQL-backed queue/job; chưa cần Redis/Celery nếu không cần thiết.
+
+## 7. Coordinate Parser
+
+`ocr/parser.py` phải hỗ trợ tối thiểu:
+
+```text
+LAT: 18.678456
+LONG: 105.681567
+
+18.678456, 105.681567
+
+18°40'42.4"N
+105°40'53.6"E
+```
+
+Chỉ coi OCR thành công khi có **đủ latitude và longitude hợp lệ**.
+
+Không được lấy latitude từ OCR rồi lấy longitude từ GPS.
+
+## 8. Telegram flow
+
+Không thay đổi flow báo cáo hiện tại.
+
+Khi nhận ảnh:
+
+```text
+Upload Cloudinary
+    ↓
+Lưu incident_photo
+    ↓
+Tạo OCR job
+    ↓
+Bot tiếp tục hoạt động
+```
+
+Khi preview/hoàn tất incident, coordinate service phải đảm bảo:
+
+```text
+OCR hợp lệ → dùng OCR
+OCR không có → dùng Telegram GPS
+Cả hai không có → báo thiếu tọa độ
+```
+
+## 9. Nguyên tắc quan trọng
+
+* Repository chỉ truy cập DB.
+* Service chứa business logic.
+* Handler chỉ xử lý Telegram UI/state.
+* OCR provider chỉ giao tiếp với API OCR.
+* Parser chỉ parse text.
+* Coordinate service quyết định tọa độ cuối cùng.
+* Không gọi trực tiếp OCR API trong Telegram handler.
+* Không hard-code OCR.space.
+* Có thể thêm provider mới bằng cách tạo file mới trong `ocr/providers/` mà không sửa business logic.
+* API key lưu trong environment variables.
+* Có logging và error handling đầy đủ.
+* Thiết kế để sau này có thể đổi thứ tự provider hoặc thêm provider mới bằng configuration.
+
+Hãy trước tiên kiểm tra kiến trúc/code hiện tại, sau đó **triển khai từng module theo kiến trúc trên**, tái sử dụng code hiện có nếu phù hợp và tránh tạo logic trùng lặp.
