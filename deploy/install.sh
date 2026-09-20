@@ -45,7 +45,7 @@ if [[ "$PY_MAJOR" -lt 3 || ( "$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 10 ) ]]; then
     exit 1
 fi
 
-mkdir -p "$INSTALL_DIR/storage/photos"
+mkdir -p "$INSTALL_DIR/storage"
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
 
 echo "▶ Tạo virtualenv dùng chung cho cả 3 service ..."
