@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-from database.connection_sync import get_sync_connection, get_sync_engine, release_sync_connection
+from database.connection_sync import get_sync_connection, query_df, release_sync_connection
 
 
 class ReportService:
@@ -11,9 +11,7 @@ class ReportService:
     (psycopg2), tách biệt hoàn toàn với pool asyncpg của bot Telegram."""
 
     def _query_df(self, sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
-        # Dùng SQLAlchemy engine (không phải psycopg2 connection thô) để pandas
-        # không phát UserWarning; engine tự quản lý checkout/checkin connection.
-        return pd.read_sql_query(sql, get_sync_engine(), params=params)
+        return query_df(sql, params)
 
     def _query_one(self, sql: str, params: Optional[tuple] = None) -> Optional[dict]:
         conn = get_sync_connection()

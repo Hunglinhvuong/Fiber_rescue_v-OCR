@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 from telegram import Update
 from telegram.ext import Application, ContextTypes, PersistenceInput, PicklePersistence
@@ -16,6 +17,8 @@ from services.material_service import MaterialService
 from services.photo_service import PhotoService
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 async def _post_init(application: Application) -> None:
@@ -60,8 +63,14 @@ def build_application() -> Application:
 
     # Chỉ persist user_data (user_id, role) để không cần /start lại sau khi restart bot.
     # bot_data chứa DB pool/repositories (không serialize được) nên loại trừ.
+    # Đảm bảo thư mục chứa file tồn tại trước — PicklePersistence không tự tạo
+    # thư mục cha, nếu thiếu sẽ crash với FileNotFoundError ngay lần ghi đầu tiên.
+    persistence_path = Path(settings.persistence_file)
+    if not persistence_path.is_absolute():
+        persistence_path = _PROJECT_ROOT / persistence_path
+    persistence_path.parent.mkdir(parents=True, exist_ok=True)
     persistence = PicklePersistence(
-        filepath=settings.persistence_file,
+        filepath=persistence_path,
         store_data=PersistenceInput(bot_data=False, chat_data=False, user_data=True, callback_data=False),
     )
 

@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 # ============================================================
-# Cài đặt Fiber Rescue (bot Telegram + dashboard Streamlit) làm
-# systemd service NGAY TẠI thư mục gốc dự án (không copy sang thư
-# mục khác). Bot và dashboard dùng chung 1 virtualenv (venv/).
+# Cài đặt Fiber Rescue làm 3 systemd service ĐỘC LẬP, chạy NGAY TẠI
+# thư mục gốc dự án hiện tại (không copy sang /opt hay nơi khác):
+#   - Fiber_rescue-teleBot    (bot Telegram)
+#   - Fiber_rescue-dashboard  (dashboard Streamlit)
+#   - Fiber_rescue-OcrWorker  (worker OCR toạ độ)
+# Cả 3 dùng chung 1 virtualenv (venv/) và 1 file .env.
+#
+# KHÔNG đụng tới database — tự áp schema/migration thủ công trước
+# khi khởi động services (xem database/schema.sql, database/migrations/).
 #
 # Dùng:
 #   sudo ./deploy/install.sh
 # ============================================================
 set -euo pipefail
 
-SERVICE_NAMES=("fiber_rescue" "fiber_rescue_ocr_worker")
+SERVICE_NAMES=("Fiber_rescue-teleBot" "Fiber_rescue-dashboard" "Fiber_rescue-OcrWorker")
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE_USER="${SERVICE_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
 
@@ -42,7 +48,7 @@ fi
 mkdir -p "$INSTALL_DIR/storage/photos"
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR"
 
-echo "▶ Tạo virtualenv dùng chung cho bot + dashboard + OCR worker ..."
+echo "▶ Tạo virtualenv dùng chung cho cả 3 service ..."
 sudo -u "$SERVICE_USER" python3 -m venv "$INSTALL_DIR/venv"
 sudo -u "$SERVICE_USER" "$INSTALL_DIR/venv/bin/pip" install --upgrade pip -q
 sudo -u "$SERVICE_USER" "$INSTALL_DIR/venv/bin/pip" install \
@@ -58,7 +64,7 @@ else
     NEW_ENV=0
 fi
 
-chmod +x "$INSTALL_DIR/deploy/run.sh" "$INSTALL_DIR/deploy/run_ocr_worker.sh"
+chmod +x "$INSTALL_DIR/deploy/run_telebot.sh" "$INSTALL_DIR/deploy/run_dashboard.sh" "$INSTALL_DIR/deploy/run_ocrworker.sh"
 
 echo "▶ Tạo systemd services ..."
 for SERVICE_NAME in "${SERVICE_NAMES[@]}"; do
@@ -80,10 +86,9 @@ if [[ "$NEW_ENV" -eq 1 ]]; then
 else
     echo "   1. (.env đã tồn tại sẵn, giữ nguyên) — kiểm tra lại nếu cần: sudo nano $INSTALL_DIR/.env"
 fi
-echo "   2. Tạo database (nếu chưa có): psql -d <db> -f $INSTALL_DIR/database/schema.sql"
-echo "      + áp migration OCR:         sudo -u $SERVICE_USER $INSTALL_DIR/venv/bin/python -m scripts.migrate_002_ocr_coordinate"
-echo "   3. Điền OCR_SPACE_API_KEY (và GOOGLE_VISION_API_KEY nếu muốn fallback) trong $INSTALL_DIR/.env"
-echo "   4. Khởi động:      sudo systemctl start ${SERVICE_NAMES[*]}"
-echo "   5. Xem trạng thái: sudo systemctl status ${SERVICE_NAMES[*]}"
-echo "   6. Xem log:        sudo journalctl -u fiber_rescue -u fiber_rescue_ocr_worker -f"
-echo "   7. Dashboard mặc định chạy ở cổng 8501 (đổi bằng DASHBOARD_PORT trong .env nếu cần)"
+echo "   2. Đảm bảo database đã sẵn sàng (schema + mọi migration cần thiết) — tự thực hiện thủ công,"
+echo "      script cài đặt này KHÔNG đụng tới database."
+echo "   3. Khởi động:      sudo systemctl start ${SERVICE_NAMES[*]}"
+echo "   4. Xem trạng thái: sudo systemctl status ${SERVICE_NAMES[*]}"
+echo "   5. Xem log:        sudo journalctl -u ${SERVICE_NAMES[0]} -u ${SERVICE_NAMES[1]} -u ${SERVICE_NAMES[2]} -f"
+echo "   6. Dashboard mặc định chạy ở cổng 8501 (đổi bằng DASHBOARD_PORT trong .env nếu cần)"
