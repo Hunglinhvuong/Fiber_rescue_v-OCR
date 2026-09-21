@@ -86,14 +86,6 @@ _RE_DMS_SPACED_SUFFIX = re.compile(
 # 105°34'59"E (long, 3 chữ số độ). Bắt buộc có hemisphere ngay sau để biết
 # đây là toạ độ (không thì chỉ là 1 dãy số bất kỳ) VÀ để biết số chữ số độ
 # (N/S -> 2 chữ số độ, E/W -> 3 chữ số độ) ----
-_RE_DMS_PACKED = re.compile(
-    r"(?<!\d)"
-    r"(?P<deg>\d{1,3})\s+"
-    r"(?P<min>\d{1,2})\s+"
-    r"(?P<sec>\d{1,2}(?:[.,]\d{1,3})?)\s*"
-    r"(?P<phemi>" + _HEMI + r")"
-    r"(?!\w)"
-)
 
 # ---- Pattern DECIMAL_PAIR: cặp thập phân ĐỨNG CẠNH NHAU, mọi biến thể:
 # "18.678456, 105.681567", "18.678456°N 105.681567°E",
@@ -217,10 +209,6 @@ def _extract_dms_tokens(text: str) -> List[Dict]:
     candidates: List[Dict] = []
     for m in _RE_DMS_SYMBOL.finditer(text):
         candidates.append(_token_from_match(m, "symbol"))
-    for m in _RE_DMS_PACKED.finditer(text):
-        token = _packed_token_from_match(m)
-        if token is not None:
-            candidates.append(token)
     for m in _RE_DMS_SPACED_PREFIX.finditer(text):
         candidates.append(_token_from_match(m, "spaced"))
     for m in _RE_DMS_SPACED_SUFFIX.finditer(text):
