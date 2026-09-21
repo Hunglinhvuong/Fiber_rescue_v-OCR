@@ -10,19 +10,40 @@ from ocr.models import ParsedCoordinate
 #  2) lọc "đúng 1 cặp" trong pattern BBOX_SCAN (quét mọi số thực trong ảnh).
 # Đây KHÔNG phải bước validate cuối — validate -90..90/-180..180 và biên VN
 # chính thức vẫn do CoordinateService đảm nhiệm.
-_VN_LAT_RANGE = (8.5, 23)
+_VN_LAT_RANGE = (7.5, 23.5)
 _VN_LON_RANGE = (101.5, 110.0)
 
 _HEMI = r"[NSEWnsew]"
-# Cho phép khoảng trắng quanh dấu thập phân (lỗi OCR hay chèn khoảng trắng
-# sau dấu chấm/phẩy, ví dụ "18. 678456"). 3-9 chữ số thập phân theo yêu cầu
-# thực tế: ảnh checkin thường chỉ có toạ độ là số có nhiều chữ số thập phân
-# như vậy, còn thời gian/pin/dung lượng thường 0-2 chữ số thập phân.
-_NUM = r"[-+]?\d{1,3}\s*[.,]\s*\d{3,9}"
+# KHÔNG cho phép khoảng trắng quanh dấu thập phân nữa (từng cho phép để
+# chịu lỗi OCR kiểu "18. 678456", nhưng chính điều này khiến cụm ngày/năm
+# dạng "9, 2026" (có dấu cách sau dấu phẩy — cách viết ngày tháng rất phổ
+# biến) bị bắt nhầm thành số thập phân 9.2026 -> sai vĩ độ. 3-9 chữ số thập
+# phân: ảnh checkin chỉ có toạ độ là số nhiều chữ số thập phân như vậy, còn
+# giờ/pin/dung lượng thường 0-2 chữ số.
+_NUM = r"[-+]?\d{1,3}[.,]\d{3,9}"
 _NUM_RE = re.compile(_NUM)
 
 _DEG = r"\d{1,3}"
 _MIN_SEC = r"\d{1,2}(?:\s*[.,]\s*\d+)?"
+
+# ---- Khử nhiễu ngày/giờ trước khi parse toạ độ — các cụm số kiểu ngày
+# tháng/giờ rất dễ bị BBOX_SCAN hoặc DECIMAL_PAIR bắt nhầm thành toạ độ
+# (vd "18 thg 9, 2026 14:56:19 GMT+07:00" từ ảnh check-in). Thay bằng 1
+# khoảng trắng (không xoá hẳn) để tránh 2 cụm số ở 2 bên vô tình dính lại
+# thành 1 số mới. ----
+_RE_NOISE = re.compile(
+    r"\b\d{1,2}\s*(?:thg|tháng)\s*\d{1,2}\b"        # "18 thg 9" / "18 tháng 9"
+    r"|\b\d{1,2}\s*,\s*(?:19|20)\d{2}\b"            # "9, 2026" (ngày, năm)
+    r"|\b\d{1,2}:\d{2}:\d{2}\b"                     # "14:56:19"
+    r"|\bGMT\s*[+-]\d{1,2}:\d{2}\b"                 # "GMT+07:00"
+    r"|\b\d{1,2}/\d{1,2}/\d{4}\b",                  # "18/09/2026"
+    re.IGNORECASE,
+)
+
+
+def _strip_noise(text: str) -> str:
+    return _RE_NOISE.sub(" ", text)
+
 
 # ---- Pattern LABELED: nhãn riêng "LAT: 18.678456" / "Vĩ độ: 18.678456" ----
 _RE_LABELED_LAT = re.compile(
@@ -60,6 +81,20 @@ _RE_DMS_SPACED_SUFFIX = re.compile(
     r"\s*(?P<hpost>" + _HEMI + r")"
 )
 
+# ---- Pattern DMS dính liền (không dấu cách, không ký hiệu) kiểu app
+# GPS Map Camera: "192542N" = 19°25'42"N (lat, 2 chữ số độ), "1053459E" =
+# 105°34'59"E (long, 3 chữ số độ). Bắt buộc có hemisphere ngay sau để biết
+# đây là toạ độ (không thì chỉ là 1 dãy số bất kỳ) VÀ để biết số chữ số độ
+# (N/S -> 2 chữ số độ, E/W -> 3 chữ số độ) ----
+_RE_DMS_PACKED = re.compile(
+    r"(?<!\d)"
+    r"(?P<deg>\d{1,3})\s+"
+    r"(?P<min>\d{1,2})\s+"
+    r"(?P<sec>\d{1,2}(?:[.,]\d{1,3})?)\s*"
+    r"(?P<phemi>" + _HEMI + r")"
+    r"(?!\w)"
+)
+
 # ---- Pattern DECIMAL_PAIR: cặp thập phân ĐỨNG CẠNH NHAU, mọi biến thể:
 # "18.678456, 105.681567", "18.678456°N 105.681567°E",
 # "N 18.678456 E 105.681567" ----
@@ -68,6 +103,10 @@ _RE_DECIMAL_PAIR = re.compile(
     r"\s*[,;/\s]\s*"
     r"(?:(?P<h2pre>" + _HEMI + r")\s*)?(?P<v2>" + _NUM + r")\s*°?\s*(?P<h2post>" + _HEMI + r")?"
 )
+
+# ---- 1 số thập phân đứng lẻ + hemisphere (không cần số thứ 2 đứng cạnh) —
+# dùng cho pattern MIXED: 1 bên là DMS, bên kia là thập phân độ thường ----
+_RE_DECIMAL_HEMI = re.compile(r"(?P<v>" + _NUM + r")\s*°?\s*(?P<hemi>" + _HEMI + r")")
 
 
 def _to_float(raw: str) -> float:
@@ -141,19 +180,54 @@ def _token_from_match(m: "re.Match", source: str) -> Dict:
     }
 
 
+def _packed_token_from_match(m: "re.Match") -> Optional[Dict]:
+    """'192542N' -> deg=19 (2 chữ số vì N/S), min=25, sec=42. '1053459E' ->
+    deg=105 (3 chữ số vì E/W), min=34, sec=59. Validate min/sec trong
+    0-59 và độ trong biên hợp lệ để giảm khớp nhầm số ngẫu nhiên."""
+    hemi = m.group("phemi").upper()
+    packed = m.group("packed")
+    deg_len = 2 if hemi in ("N", "S") else 3
+    if len(packed) != deg_len + 4:
+        return None
+
+    deg = int(packed[:deg_len])
+    minute = int(packed[deg_len : deg_len + 2])
+    sec_int = int(packed[deg_len + 2 : deg_len + 4])
+    max_deg = 90 if hemi in ("N", "S") else 180
+    if not (0 <= deg <= max_deg and 0 <= minute <= 59 and 0 <= sec_int <= 59):
+        return None
+
+    frac = m.group("pfrac")
+    sec = sec_int + (float("0." + frac) if frac else 0.0)
+    return {
+        "start": m.start(),
+        "end": m.end(),
+        "magnitude": deg + minute / 60 + sec / 3600,
+        "hemi": hemi,
+        "raw": m.group(0).strip(),
+        "source": "packed",
+    }
+
+
 def _extract_dms_tokens(text: str) -> List[Dict]:
-    """Quét cả pattern có ký hiệu °/'/" và pattern cách khoảng trắng (yêu
-    cầu hemisphere), gộp lại theo vị trí xuất hiện, loại các match chồng
-    lấp (ưu tiên pattern có ký hiệu vì rõ ràng/ít nhầm hơn)."""
+    """Quét pattern có ký hiệu °/'/", pattern cách khoảng trắng, và pattern
+    dính liền (packed, yêu cầu hemisphere) — gộp lại theo vị trí xuất hiện,
+    loại các match chồng lấp (ưu tiên pattern có ký hiệu vì rõ ràng/ít nhầm
+    hơn, kế đến packed, cuối cùng spaced)."""
     candidates: List[Dict] = []
     for m in _RE_DMS_SYMBOL.finditer(text):
         candidates.append(_token_from_match(m, "symbol"))
+    for m in _RE_DMS_PACKED.finditer(text):
+        token = _packed_token_from_match(m)
+        if token is not None:
+            candidates.append(token)
     for m in _RE_DMS_SPACED_PREFIX.finditer(text):
         candidates.append(_token_from_match(m, "spaced"))
     for m in _RE_DMS_SPACED_SUFFIX.finditer(text):
         candidates.append(_token_from_match(m, "spaced"))
 
-    candidates.sort(key=lambda c: (c["start"], 0 if c["source"] == "symbol" else 1))
+    _priority = {"symbol": 0, "packed": 1, "spaced": 2}
+    candidates.sort(key=lambda c: (c["start"], _priority[c["source"]]))
 
     tokens: List[Dict] = []
     used_spans: List[tuple] = []
@@ -179,6 +253,39 @@ def _try_dms(text: str) -> Optional[ParsedCoordinate]:
         longitude=lon,
         raw_match=f"{t1['raw']} {t2['raw']}",
         pattern_name="DMS",
+    )
+
+
+def _try_mixed(text: str) -> Optional[ParsedCoordinate]:
+    """Trường hợp lai: 1 bên là DMS/DDM (ký hiệu/cách khoảng trắng/dính
+    liền như '192542N'), bên còn lại là số thập phân độ đứng cùng
+    hemisphere như '105,7174E' — không đứng cạnh nhau theo kiểu
+    DECIMAL_PAIR (không có dấu phẩy/gạch/khoảng trắng nối trực tiếp giữa 2
+    giá trị). OCR đôi khi đọc lệch định dạng giữa lat và long trong cùng 1
+    ảnh. Chỉ áp dụng khi có ĐÚNG 1 token DMS và ĐÚNG 1 số thập phân+hemisphere
+    còn lại trong text — nếu nhiều hơn thì quá mơ hồ, bỏ qua."""
+    dms_tokens = _extract_dms_tokens(text)
+    if len(dms_tokens) != 1:
+        return None
+    dms_token = dms_tokens[0]
+
+    decimal_candidates = [
+        m
+        for m in _RE_DECIMAL_HEMI.finditer(text)
+        if not (m.start() < dms_token["end"] and m.end() > dms_token["start"])
+    ]
+    if len(decimal_candidates) != 1:
+        return None
+    dec = decimal_candidates[0]
+
+    lat, lon = _resolve_pair(
+        dms_token["magnitude"], dms_token["hemi"], _to_float(dec.group("v")), dec.group("hemi").upper()
+    )
+    return ParsedCoordinate(
+        latitude=lat,
+        longitude=lon,
+        raw_match=f"{dms_token['raw']} {dec.group(0).strip()}",
+        pattern_name="MIXED",
     )
 
 
@@ -231,16 +338,19 @@ def _try_bbox_scan(text: str) -> Optional[ParsedCoordinate]:
 
 
 def parse_coordinates(text: str) -> Optional[ParsedCoordinate]:
-    """Thử lần lượt các pattern theo độ tin cậy giảm dần:
-    LABELED -> DMS/DDM (ký hiệu hoặc cách khoảng trắng) -> DECIMAL_PAIR
-    (cặp số liền nhau) -> BBOX_SCAN (quét mọi số + bounding box VN).
-    Trả về match đầu tiên có ĐỦ lat+long từ CÙNG một nguồn — không bao giờ
-    ghép lat từ pattern/nguồn này với long từ pattern/nguồn khác. Trả None
-    nếu không tìm thấy gì hợp lệ."""
+    """Khử nhiễu ngày/giờ trước, rồi thử lần lượt các pattern theo độ tin
+    cậy giảm dần: LABELED -> DMS/DDM (ký hiệu, cách khoảng trắng, hoặc dính
+    liền kiểu '192542N') -> MIXED (1 bên DMS, 1 bên thập phân) ->
+    DECIMAL_PAIR (2 số thập phân liền nhau) -> BBOX_SCAN (quét mọi số +
+    bounding box VN). Trả về match đầu tiên có ĐỦ lat+long từ CÙNG một
+    nguồn — không bao giờ ghép lat từ pattern/nguồn này với long từ
+    pattern/nguồn khác. Trả None nếu không tìm thấy gì hợp lệ."""
     if not text:
         return None
 
-    for parser_fn in (_try_labeled, _try_dms, _try_decimal_pair, _try_bbox_scan):
+    text = _strip_noise(text)
+
+    for parser_fn in (_try_labeled, _try_dms, _try_mixed, _try_decimal_pair, _try_bbox_scan):
         result = parser_fn(text)
         if result is not None:
             return result
