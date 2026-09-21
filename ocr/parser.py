@@ -10,7 +10,7 @@ from ocr.models import ParsedCoordinate
 #  2) lọc "đúng 1 cặp" trong pattern BBOX_SCAN (quét mọi số thực trong ảnh).
 # Đây KHÔNG phải bước validate cuối — validate -90..90/-180..180 và biên VN
 # chính thức vẫn do CoordinateService đảm nhiệm.
-_VN_LAT_RANGE = (7.5, 23.5)
+_VN_LAT_RANGE = (12.5, 23.5)
 _VN_LON_RANGE = (101.5, 110.0)
 
 _HEMI = r"[NSEWnsew]"
@@ -20,10 +20,19 @@ _HEMI = r"[NSEWnsew]"
 # biến) bị bắt nhầm thành số thập phân 9.2026 -> sai vĩ độ. 3-9 chữ số thập
 # phân: ảnh checkin chỉ có toạ độ là số nhiều chữ số thập phân như vậy, còn
 # giờ/pin/dung lượng thường 0-2 chữ số.
-_NUM = r"[-+]?\d{1,3}[.,]\d{3,9}"
+# Ranh giới: phía trước KHÔNG được là chữ số hoặc chữ cái nào ngoài N/S/E/W
+# (hemisphere có thể dính liền như "N18.67"). Nhờ vậy "T05,7055E" (OCR đọc
+# nhầm "105" thành "T05") bị BỎ HẲN thay vì bị hiểu thành 5.7055. Phía sau
+# không được là chữ số (tránh cắt cụt số dài hơn 9 chữ số thập phân).
+_NUM = r"(?<!\d)(?<![^\W\d_NSEWnsew])[-+]?\d{1,3}[.,]\d{3,9}(?!\d)"
 _NUM_RE = re.compile(_NUM)
 
-_DEG = r"\d{1,3}"
+# Độ: không được bắt đầu/kết thúc giữa chừng một số khác ("2026" -> "026"/"26").
+_DEG = r"(?<!\d)\d{1,3}(?!\d)"
+# Dạng cách khoảng trắng (không có ký hiệu °) dễ nhầm với đuôi của số khác
+# (giờ "11:45.32", năm "2026", "GMT+07:00") nên chặt hơn: phía trước không
+# được là chữ số / . , : + -
+_DEG_STRICT = r"(?<![\d.,:+\-])\d{1,3}(?!\d)"
 _MIN_SEC = r"\d{1,2}(?:\s*[.,]\s*\d+)?"
 
 # ---- Khử nhiễu ngày/giờ trước khi parse toạ độ — các cụm số kiểu ngày
@@ -32,11 +41,25 @@ _MIN_SEC = r"\d{1,2}(?:\s*[.,]\s*\d+)?"
 # khoảng trắng (không xoá hẳn) để tránh 2 cụm số ở 2 bên vô tình dính lại
 # thành 1 số mới. ----
 _RE_NOISE = re.compile(
-    r"\b\d{1,2}\s*(?:thg|tháng)\s*\d{1,2}\b"        # "18 thg 9" / "18 tháng 9"
-    r"|\b\d{1,2}\s*,\s*(?:19|20)\d{2}\b"            # "9, 2026" (ngày, năm)
-    r"|\b\d{1,2}:\d{2}:\d{2}\b"                     # "14:56:19"
-    r"|\bGMT\s*[+-]\d{1,2}:\d{2}\b"                 # "GMT+07:00"
-    r"|\b\d{1,2}/\d{1,2}/\d{4}\b",                  # "18/09/2026"
+    # Ngày đầy đủ kèm năm: "19 thg 9, 2026" / "20 Th9, 2026" / "20 tháng 9 2026"
+    r"\b\d{1,2}\s*(?:thg|tháng|th)\s*\.?\s*\d{1,2}\s*,?\s*(?:19|20)\d{2}\b"
+    # Ngày kiểu tiếng Anh: "Sep 19, 2026" / "19 Sep 2026"
+    r"|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*\d{1,2}\s*,?\s*(?:19|20)\d{2}\b"
+    r"|\b\d{1,2}\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*,?\s*(?:19|20)\d{2}\b"
+    # Ngày còn sót không kèm năm: "18 thg 9", "20 Th9"
+    r"|\b\d{1,2}\s*(?:thg|tháng|th)\s*\.?\s*\d{1,2}\b"
+    # "9, 2026" (ngày/tháng, năm)
+    r"|\b\d{1,2}\s*,\s*(?:19|20)\d{2}\b"
+    # Ngày số: 18/09/2026, 18-09-2026, 18.09.2026, 2026-09-18
+    r"|\b\d{1,2}[/.\-]\d{1,2}[/.\-](?:19|20)\d{2}\b"
+    r"|\b(?:19|20)\d{2}[/.\-]\d{1,2}[/.\-]\d{1,2}\b"
+    # Giờ: "14:56:19", "11:21", và giờ OCR lỗi dấu "11:45.32"
+    # (bắt buộc có ':' đầu tiên nên không đụng số thập phân toạ độ)
+    r"|\b\d{1,2}:\d{2}(?:[:.]\d{2})?\b"
+    # Múi giờ: "GMT+07:00", "UTC-7", "GMT+0700"
+    r"|\b(?:GMT|UTC)\s*[+-]\s*\d{1,2}(?::?\d{2})?\b"
+    # Plus Code (Google Open Location Code): "6PR3+2J7"
+    r"|\b[23456789CFGHJMPQRVWX]{4,8}\+[23456789CFGHJMPQRVWX]{2,3}\b",
     re.IGNORECASE,
 )
 
@@ -70,12 +93,12 @@ _RE_DMS_SYMBOL = re.compile(
 # ID, độ cao...) — nếu không có hemisphere thì bỏ qua, để BBOX_SCAN xử lý ----
 _RE_DMS_SPACED_PREFIX = re.compile(
     r"(?P<hpre>" + _HEMI + r")\s+"
-    r"(?P<deg>" + _DEG + r")\s+"
+    r"(?P<deg>" + _DEG_STRICT + r")\s+"
     r"(?P<min>" + _MIN_SEC + r")"
     r"(?:\s+(?P<sec>" + _MIN_SEC + r"))?"
 )
 _RE_DMS_SPACED_SUFFIX = re.compile(
-    r"(?P<deg>" + _DEG + r")\s+"
+    r"(?P<deg>" + _DEG_STRICT + r")\s+"
     r"(?P<min>" + _MIN_SEC + r")"
     r"(?:\s+(?P<sec>" + _MIN_SEC + r"))?"
     r"\s*(?P<hpost>" + _HEMI + r")"
@@ -161,8 +184,20 @@ def _dms_magnitude(deg: str, minute: Optional[str], sec: Optional[str]) -> float
     return d + m / 60 + s / 3600
 
 
-def _token_from_match(m: "re.Match", source: str) -> Dict:
+def _to_float_loose(raw: str) -> float:
+    return float(raw.replace(" ", "").replace(",", "."))
+
+
+def _token_from_match(m: "re.Match", source: str) -> Optional[Dict]:
     groups = m.groupdict()
+    # Phút/giây phải < 60, độ <= 180 — không thì đây không phải toạ độ DMS
+    # (vd rác OCR "00 18,83 N") -> bỏ token thay vì đoán.
+    if float(groups["deg"]) > 180:
+        return None
+    if groups.get("min") and _to_float_loose(groups["min"]) >= 60:
+        return None
+    if groups.get("sec") and _to_float_loose(groups["sec"]) >= 60:
+        return None
     return {
         "start": m.start(),
         "end": m.end(),
@@ -179,11 +214,14 @@ def _extract_dms_tokens(text: str) -> List[Dict]:
     hiệu vì rõ ràng/ít nhầm hơn)."""
     candidates: List[Dict] = []
     for m in _RE_DMS_SYMBOL.finditer(text):
-        candidates.append(_token_from_match(m, "symbol"))
-    for m in _RE_DMS_SPACED_PREFIX.finditer(text):
-        candidates.append(_token_from_match(m, "spaced"))
-    for m in _RE_DMS_SPACED_SUFFIX.finditer(text):
-        candidates.append(_token_from_match(m, "spaced"))
+        tok = _token_from_match(m, "symbol")
+        if tok:
+            candidates.append(tok)
+    for rx in (_RE_DMS_SPACED_PREFIX, _RE_DMS_SPACED_SUFFIX):
+        for m in rx.finditer(text):
+            tok = _token_from_match(m, "spaced")
+            if tok:
+                candidates.append(tok)
 
     _priority = {"symbol": 0, "spaced": 1}
     candidates.sort(key=lambda c: (c["start"], _priority[c["source"]]))
